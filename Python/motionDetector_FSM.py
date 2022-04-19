@@ -2,11 +2,12 @@
 # @file motionDetector_FSM.py
 # @author Leonardo Brandão Borges de Freitas (contato.leonardobbf@gmail.com)
 # @date 26 Mar 2021
-# @brief Classe Python para detecção de movimento baseado na máquina de estados do meu TCC1
+# @brief Classe Python para detecção de movimento baseado na máquina de estados do meu TCC
 #   
-#  Diagrama de bloco da FSM: https://drive.google.com/file/d/18bM7gxYAv3rrYRTcxtIaTuT-0rMBh7-F/view?usp=sharing
+#  Diagrama de bloco da FSM: 
 #
 
+from re import L
 from cv2 import (VideoCapture, VideoWriter_fourcc, imshow, waitKey, 
                  blur, INTER_AREA, COLOR_BGR2GRAY, cvtColor, absdiff, 
                  GaussianBlur, threshold, destroyAllWindows) 
@@ -23,26 +24,33 @@ class FrameCapture():
     #
     def __init__(self, 
                  capture_path,
-                 fifo_out):
+                 fifo_out,
+                 fps,
+                 fps_percent,
+                 resolution,
+                 event_time):
 
         # Define os parametros de captura
-        self.source_fps = 15 
-        self.fps_percent = 20
-        self.source_resolution = [640, 480]
-        self.event_time = 5 #segundos
+        self.path = capture_path
+        self.source_fps = fps 
+        self.fps_percent = fps_percent
+        self.source_resolution = resolution
+        self.event_time = event_time #segundos
 
         # Apresenta os parâmetros na tela
         print(f"FrameCapture:\n\
-        \tpath = {capture_path},\n\
-        \tfps = {self.source_fps},\n\
-        \tresolution = {self.source_resolution}")
+        \tpath = {self.path},\n\
+        \tsource_fps = {self.source_fps},\n\
+        \tresolution = {self.source_resolution},\n\
+        \treal_fps = {self.source_fps*fps_percent/100}\n\
+        \tevent_time = {self.event_time}")
 
         # Tratando o caminho de captura pra webcam
-        if capture_path == '0':
-            capture_path = 0
+        if self.path == '0':
+            self.path = 0
 
         # Instancia um objeto de captura de vídeo (via OpenCV)
-        self.cap = VideoCapture(capture_path)
+        self.cap = VideoCapture(self.path)
 
         # Coloca como self a fila de saída
         self.fifo = fifo_out
@@ -88,7 +96,7 @@ class FrameCapture():
     #
     def stop(self):
         
-        # Se a classe for iniciada
+        # Se a classe foi iniciada
         if self.should_continue:
 
             # Abaixa a flag de continuidade
@@ -143,89 +151,254 @@ class FrameCapture():
             except CaptureError as err:
                 # Informa o ocorrido
                 print(f'run: {err}')
-                # e quebra o laço
-                break
+                # e pausa os eventos da thread
+                self.ready.clear()
 
             # Se a fila estiver cheia
             except Full as err:
                 # Informa o corrido 
                 print(f'run: {err}, qsize = {self.fifo.qsize()}')
-                # e pausa os eventos da thread
+                
                 self.ready.clear()
 
     ## @brief Método para capturar um frame
     #
     def capture(self):
 
-        # Captura o frame 
-        for j in range(int(100/self.fps_percent)):
+        # Para o caso do caminho de captura apontar para um vídeo mp4
+        if self.path.find(".mp4") != -1:
+
+            # Agarra um frame do fluxo
             ret = self.cap.grab()
 
-            # Verifica se o frame foi capturado com sucesso
+            # Se o frame não foi agarrado com sucesso
             if not ret:
-                # Se não foi, lança a exceção CaptureError
-                raise CaptureError('Capture Error')
-        
-        # Se o frame foi capturado com sucesso
-        # Executa o método retrieve para armazenar o frame capturado
-        _, frame = self.cap.retrieve()
+                raise CaptureError('grab error (mp4)')
 
+            # Captura e armazena o frame em memória 
+            ret, frame = self.cap.retrieve()
+
+            # Se o frame não foi capturado com sucesso 
+            if not ret:
+                raise CaptureError('retrieve error (mp4)')
+
+        # Para o caso de apontar para um streamer (Câmera ou webcam)
+        else:
+
+            # Agarra os frames espaçados de acordo com o fps_percent
+            for j in range(int(100/self.fps_percent)):
+                ret = self.cap.grab()
+
+                if not ret:
+                    raise CaptureError('grab error')
+            
+            # Captura e armazena o frame em memória 
+            ret, frame = self.cap.retrieve()
+            
+            if not ret:
+                raise CaptureError('retrieve error')
+
+        # Apresenta o frame capturado na tela
         imshow('frame', frame)
-        waitKey(0)
-        
+        waitKey(100)
+
         # retorna o frame capturado
         return frame
 
+    
 class MotionDetector():
 
     ## @brief Instanciador da classe MotionDetector
     #   
     #
-    def __init__(self):
+    def __init__(self,
+                chunk_lines = 30,
+                chunk_columns = 40,
+                threshold = 15):
 
         # Define os parametros de detecção
-        self.thresh = 15
-        self.chunk_lines = 30
-        self.chunk_columns = 40
+        self.chunk_lines = chunk_lines
+        self.chunk_columns = chunk_columns
+        self.thresh = threshold
         
         print(f"MotionDetector:\n\
         \tthreshold = {self.thresh},\n\
         \tchunk_lines = {self.chunk_lines},\n\
         \tchunk_columns = {self.chunk_columns}")
 
+        ''' CONTADORES '''
+        # Contador total de pixels
+        self.total_bytes = 0
+
         # Contador de bytes
         self.b = 0
-        print(f'Contador de bytes = {self.b}')
-
-        # Contador de linhas completas
-        self.l = 0
-        print(f'Contador de linhas completas = {self.l}')
+        print(f'Contador de bytes (b) = {self.b}')
 
         # Seletora do mux de registradores
         self.sel = 0 
-        print(f'Seletora = {self.sel}')
+        print(f'Seletora (sel) = {self.sel}')
 
-        # Contador de linhas da matriz de chunks
-        self.j = 0
-        print(f'Contador de linhas da matriz de chunks = {self.j}')
+        # Contador de linhas de pixel 
+        self.lp = 0
+        print(f'Contador de linhas de pixel (lp) = {self.lp}')
 
-        # Contador de colunas da matriz de chunks
-        self.c = 0
-        print(f'Contador de colunas da matriz de chunks = {self.c}')
+        # Contador de linhas de chunks
+        self.lc = 0
+        print(f'Contador de linhas de chunks (lc) = {self.lc}')
 
-        # Registradores para a primeira linha de chunks
-        self.reg = np.zeros(self.chunk_columns, dtype=np.uint16)
-        print(f'registradores = {self.reg.shape}')
-
-        # Matriz de média dos chunks 
-        self.mc = np.zeros((self.chunk_lines, self.chunk_columns), dtype=int)
-        print(f'Matriz de Média dos Chunks = {self.mc.shape}')
+        # Contador de linhas do segundo frame
+        self.l = 0
+        print(f'Contador de linhas do segundo frame (l) = {self.l}')
 
         # Acumulador de movimento para os 1200 chunks
         self.am = 0
-        print(f'acumulador de Movimento = {self.am}')
+        print(f'Acumulador de Movimento (am) = {self.am}')
 
-    def preparaPar(self, frame1, frame2):
+
+        ''' REGISTRADORES '''
+        # Registradores de entrada
+        self.reg = np.zeros(self.chunk_columns, dtype=np.uint16)
+        print(f'Registradores de entrada = reg{self.reg.shape}')
+
+        # Matriz de chunks 
+        self.mc = np.zeros((self.chunk_lines, self.chunk_columns), dtype=int)
+        print(f'Matriz de Chunks = MC{self.mc.shape}')
+
+        # Vetor de Movimento
+        self.vm = np.zeros(self.chunk_columns, dtype=int)
+        print(f'Vetor de Movimento = VM{self.vm.shape}')
+     
+    def pegaPixel(self, I):
+
+        # Aloca o valor do pixel na variável vp
+        vp = I[self.b]
+
+        # retorna valor do pixel
+        return vp
+
+    def acumulador(self, vp):
+
+        # Aculuma o valor de intensidade do pixel lido
+        self.reg[self.sel] += vp
+
+        # Itera o contador de pixels
+        self.b += 1
+
+        self.total_bytes +=1
+
+    def iteraSel(self):
+
+        # Itera a seletora
+        self.sel += 1
+
+    def zeraSel(self):
+
+        # Zera a seletora
+        self.sel = 0
+
+        # Itera o contador de linhas de pixel
+        self.lp += 1
+
+    def shiftRight(self):
+
+        # Zera o contador de linhas de pixel
+        self.lp = 0
+
+        # Executa o deslocamento a direita em todos os registradore
+        for i in range(len(self.reg)):
+            self.reg[i] = self.reg[i] >> 8  
+
+    def alocaMedias(self):
+
+        # para cada posição do registrador
+        for i in range(len(self.reg)):
+            # aloca a média na matriz de chunks
+            self.mc[self.lc][i] = self.reg[i]
+            # zera o registrador
+            self.reg[i] = 0
+
+        # Itera o contador de linhas de chunks
+        self.lc += 1
+
+    def mediasDiff(self):
+
+        # para cada posição do registrador
+        for i in range(len(self.reg)):
+
+            # Subtrai a média de um quadrante do primeiro frame 
+            # com a média de um quadrante do segundo frame
+            self.mc[self.l][i] = self.mc[self.l][i] - self.reg[i]
+
+            # A posição do registrador é zerada
+            self.reg[i] = 0
+
+    def complementoDe2(self):
+
+        # para cada posição do registrador
+        for i in range(len(self.reg)):
+
+            # Se a diferença entre as médias for negativa
+            if self.mc[self.l][i] < np.uint8(0):
+                # Aplica o complemento de dois para encontrar o módulo
+                self.mc[self.l][i] = self.mc[self.l][i] * (-1) 
+
+    def limiarizacao(self):
+
+        # para cada posição do registrador
+        for i in range(len(self.reg)):
+
+            # Se o modulo da diferença entre os chunks do primeiro e do segundo frame
+            # for maior que o limiar instânciado 
+            if self.mc[self.l][i] > self.thresh:
+                # A posição atual do veor de movimento recebe 1
+                self.vm[i] = 1
+            # Caso contrário,
+            else:
+                # Recebe 0
+                self.vm[i] = 0
+
+        # O contador de colunas da matriz de chunks é iterado
+        self.l += 1
+
+    def contaUm(self):
+
+        # Acumula em am os 1s do vetor de movimento
+        for value in self.vm:
+            self.am+=value
+
+
+    def verificaMovimento(self):
+
+        #print(f'am = {self.am}')
+
+        # Se pelo menos 25% dos chunks (1200/4 = 300) acusarem movimento
+        if self.am >= 300:
+            # Retorna que houve movimento
+            return 1
+
+        # Se não,
+        else:
+            # Retorna que não houve movimento
+            return 0
+
+    def reset(self):
+
+        # Zera os contadores 
+        self.b = 0
+        self.sel = 0 
+        self.lp = 0
+        self.lc = 0
+        self.l = 0
+        self.am = 0
+
+        # Zera os registradores
+        self.reg = np.zeros(self.chunk_columns, dtype=np.uint16)
+        self.mc = np.zeros((self.chunk_lines, self.chunk_columns), dtype=int)
+        self.vm = np.zeros(self.chunk_columns, dtype=np.uint16)
+
+## @brief Função para concatenar dois frames em escala de cinza
+#
+def concatenateGrayPair(frame1, frame2):
 
         # Coloca os frames em escala de cinza
         frame1 = cvtColor(frame1, COLOR_BGR2GRAY)
@@ -244,116 +417,6 @@ class MotionDetector():
         # retonar o vetor de intensidades do frame
         return I
 
-    def pegaPixel(self, I):
-
-        # Aloca o valor do pixel na variável vp
-        vp = I[self.b]
-
-        # retorna valor do pixel
-        return vp
-
-    def acumulador(self, vp):
-
-        # Aculuma o valor de intensidade do pixel lido
-        self.reg[self.sel] += vp
-
-        # Itera o contador de pixels
-        self.b += 1
-
-    def iteraSel(self):
-
-        # Itera a seletora
-        self.sel += 1
-
-    def zeraSel(self):
-
-        # Zera a seletora
-        self.sel = 0
-
-        # Itera o contador de linhas completas
-        self.l += 1
-
-    def shiftRight(self):
-
-        # Executa o deslocamento a direita em todos os registradore
-        for i in range(len(self.reg)):
-            self.reg[i] = self.reg[i] >> 8
-
-        # Itera o contador de linhas da matriz de chunks
-        self.j += 1
-
-        # Zera o contador de linhas completas
-        self.l = 0
-
-        # Zera o contador de colunas da matriz de chunks
-        self.c = 0
-
-    def alocaMedias(self):
-
-        # para cada posição do registrador
-        for i in range(len(self.reg)):
-            # aloca a média na matriz de chunks
-            self.mc[self.j-1][i] = self.reg[i]
-            # zera o registrador
-            self.reg[i] = 0
-
-    def mediasDiff(self):
-
-        # Subtrai a média de um quadrante do primeiro frame 
-        # com a média de um quadrante do segundo frame
-        self.mc[self.j-31][self.c] = self.mc[self.j-31][self.c] - self.reg[self.c]
-
-        # A posição do registrador é zerada
-        self.reg[self.c] = 0
-
-    def complementoDe2(self):
-
-        # Se a diferença entre as médias for negativa
-        if self.mc[self.j-31][self.c] < np.uint8(0):
-            # Aplica o complemento de dois para encontrar o módulo
-            self.mc[self.j-31][self.c] = self.mc[self.j-31][self.c] * (-1) 
-
-    def limiarizacao(self):
-
-        # Se o quadrante atual for maior que o quadrante anterior vezes o limiar atribuido
-        if self.mc[self.j-31][self.c] > self.thresh:
-            # O acumulador de movimento é iterado
-            self.am += 1 
-
-        # O contador de colunas da matriz de chunks é iterado
-        self.c += 1    
-
-    def verificaMovimento(self):
-
-        print(f'acumulador de movimento = {self.am}')
-
-        # Se pelo menos 25% dos chunks (1200/4 = 300) acusarem movimento
-        if self.am >= 300:
-            # Retorna que houve movimento
-            return 1
-
-        # Se não,
-        else:
-            # Retorna que não houve movimento
-            return 0
-
-    def reset(self):
-
-        # Zera o contador de bytes
-        self.b = 0
-
-        # Zera a seletora do mux de registradores
-        self.sel = 0 
-
-        # Zera o contador de linhas da matriz de chunks
-        self.j = 0
-
-        # Zera o contador de colunas da matriz de chunks
-        self.c = 0
-
-        # Zera o acumulador de movimento
-        self.am = 0
-
 if __name__ == "__main__":
 
     # Recebendo os argumentos
@@ -361,15 +424,28 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("-pth", "--capture_path", required=True, 
     help="Caminho para a fonte de captura")
+    ap.add_argument("-fps", "--source_fps", required=False, type=int, default=15,
+    help="Velocidade de captura configurado na fonte, em frames por segundo")
+    ap.add_argument("-fps_percent", "--fps_percent", required=False, type=int, default=40,
+    help="Porcentagem do FPS da fonte utilizada pelo FrameProducer (valor entre 0 e 100)")
+    ap.add_argument("-rsl", "--source_resolution", required=False, type=int, nargs="+", default=[640, 480],
+    help="Resolução dos frames configurada na fonte (Largura Altura) ")
+    ap.add_argument("-event_length", "--event_length", required=False, type=int, default=3,
+    help="Tempo de captura dos eventos, em segundo")
     args = vars(ap.parse_args())
 
     # Instancia uma FIFO para enfileirar os frames capturados
     # Entrada: fc
     # Saída: md 
-    fifo = Queue(maxsize=10)
+    fifo = Queue(maxsize=20)
 
-    # Instancia um obejto FrameCapture
-    fc = FrameCapture(args["capture_path"], fifo)
+    # Instancia um objeto FrameCapture
+    fc = FrameCapture(capture_path = args["capture_path"], 
+                      fifo_out = fifo,
+                      fps = args["source_fps"], 
+                      fps_percent = args["fps_percent"],
+                      resolution = args["source_resolution"],
+                      event_time = args["event_length"])
 
     # Instancia um objeto MotionDetector
     md = MotionDetector()
@@ -388,8 +464,9 @@ if __name__ == "__main__":
     #   7: Médias Diff
     #   8: Complemento de 2
     #   9: Limiarização
-    #  10: Verifica Movimento
-    #  11: Reset
+    #  10: ContaUm
+    #  11: Verifica Movimento
+    #  12: Reset
     estado_atual = 0
     proximo_estado = 0
 
@@ -407,8 +484,8 @@ if __name__ == "__main__":
                 frame2 = fifo.get()
 
                 # Prepara o par de frame em escala de cinza e faz a concatenação unidimensional dos pixeis
-                # No vetor de intensidades
-                I = md.preparaPar(frame1, frame2)
+                # no vetor de intensidades I que é equivalente ao arquivo de pixel utilizado pelo Test Bench em VHDL)
+                I = concatenateGrayPair(frame1, frame2)
 
                 # Proximo estado será o Pega Pixel
                 proximo_estado = 1
@@ -462,35 +539,34 @@ if __name__ == "__main__":
 
                 #print(f'Zera Seletora: l = {md.l}')
 
-                # Zera a seletora e itera o contador de linhas completas
+                # Zera a seletora e itera o contador de linhas de pixel
                 md.zeraSel()
 
-                # Enquanto não tiver preenchido as 16 linhas completas para os 40 registradores 
-                if md.l < 16:
+                # Enquanto não tiver preenchido as 16 linhas de pixel para os 40 registradores 
+                if md.lp < 16:
                     # Proximo estado será o Pega Pixel
                     proximo_estado = 1
 
-                # Mas se já tiver preenchido as 16 linhas completas para os 40 registradores
-                elif md.l == 16:
+                # Mas se já tiver preenchido as 16 linhas de pixel para os 40 registradores
+                elif md.lp == 16:
                     # Proximo estado será o shift right
                     proximo_estado = 5
 
             #   5: Shift Right
             elif estado_atual == 5:
 
-                #print(f'shift right: b = {md.b}, j = {md.j}')
-
                 # Executa os deslocamentos para a direita em todos os registradores
                 # calculando a média dos pixeis acumulados
                 md.shiftRight()
 
-                # Enquanto não tiver alocado todos os chunks do primeiro frame (307200 bytes)
-                if md.b <= 307200: 
+                # Enquanto não tiver alocado as 30 linhas de chunks do primeiro frame 
+                if md.lc < 30:
+                    #print(f'shift right: b = {md.total_bytes}, lc = {md.lc}')
                     # Proximo estado será o Aloca Médias
                     proximo_estado = 6
                 
-                # Mas se ja tiver alocado todos os chunks do primeiro frame
-                if md.b > 307200: 
+                # Mas se ja tiver alocado todas as linhas de chunks do primeiro frame
+                if md.lc == 30: 
                     # Proximo estado será o Médias Diff
                     proximo_estado = 7
 
@@ -500,14 +576,14 @@ if __name__ == "__main__":
                 # Aloca as médias dos 40 chunks na matriz de chunks
                 md.alocaMedias()
 
+                #print(md.mc) 
+
                 # Proximo estado será o Pega Pixel
                 proximo_estado = 1
  
             #   7: Médias Diff
             elif estado_atual == 7:
-
-                #print(f'Médias Diff: j = {md.j}, c = {md.c}')
-
+                
                 # Executa a subtração entre as médias dos chunks 
                 # do segundo frame com o primeiro.
                 md.mediasDiff()
@@ -530,34 +606,43 @@ if __name__ == "__main__":
                 # Aplica a limiarização aos módulos calculados
                 md.limiarizacao()
 
-                # Enquanto o contador de colunas da matriz de chunks for menor que 40 
-                if md.c < 40:
-                    # o proximo estado será o Médias Diff
-                    proximo_estado = 7
+                # Proximo estado será o Conta Um
+                proximo_estado = 10
+    
+            #   10: Conta Um
+            elif estado_atual == 10:
 
-                # Se todas as colunas foram comparadas, mas os dois frames ainda não foram lidos por completo
-                elif md.c == 40 and md.b < 2*307200:
-                    # Próximo estado será o Pega pixel
+                # Conta a quantidade de uns no vetor de movimento
+                md.contaUm()
+
+                print(f'Pixels Lidos = {md.total_bytes}')
+                print(f'VM[40] = {md.vm}')
+                print(f'am = {md.am}')
+
+                # Enquanto não tiver completado as 30 linhas de chunks do segundo frame 
+                if md.l < 30:
+                    # o proximo estado será o Pega Pixel
                     proximo_estado = 1
 
-                # Se todas as colunas foram comparadas e os dois frames foram lidos por completo
-                elif md.c == 40 and md.b == 2*307200:
-                    # Próximo estado será o verifica movimento
-                    proximo_estado = 10
-
-            #  10: Verifica Movimento
-            elif estado_atual == 10:
+                # Se tiver completado as 30 linhas de chunks do segundo frame
+                elif md.l == 30:
+                    # Próximo estado será o Verifica Movimento
+                    proximo_estado = 11
+        
+            # 11: Verifica Movimento
+            elif estado_atual == 11:
 
                 # verifica se há movimento, comparando a matriz de chunks atual com a passada
                 movimento = md.verificaMovimento()
 
-                print(f'Movimento = {movimento}')
+                print(f'am = {md.am}')
+                print(f'result = {movimento}')
 
                 # Proximo estado será o Reset
-                proximo_estado = 11
+                proximo_estado = 12
             
-            #  11: Reset
-            elif estado_atual == 11:
+            #  12: Reset
+            elif estado_atual == 12:
 
                 # Reseta as variáveis de controle
                 md.reset()
