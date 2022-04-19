@@ -4,7 +4,7 @@
 # @date 26 Mar 2021
 # @brief Classe Python para detecção de movimento baseado na máquina de estados do meu TCC
 #   
-#  Diagrama de bloco da FSM: 
+#  Diagrama de bloco da FSM: https://github.com/leobbf/MotionDetector/blob/main/TCC_FSM_Completa.pdf
 #
 
 from re import L
